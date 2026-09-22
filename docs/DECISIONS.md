@@ -86,6 +86,8 @@ obj.insert("model".to_string(), json!(cand.real_model_id));
 
 **决策**：`ZCODE_MODELS` 支持 `模型ID=展示名` 语法。
 
+> 清单**内容**从哪来见 D-8（显式配置 → 自动发现 → 内置默认值）。
+
 ```
 ZCODE_MODELS=GLM-5.2=glm-5.2,GLM-5-Turbo
 ```
@@ -149,3 +151,54 @@ ZCODE_MODELS=GLM-5.2=glm-5.2,GLM-5-Turbo
 - **与环境变量不冲突**：回退分支保证容器 / CI 里直接注入 `ZCODE_KEYS` 也能工作
 
 **没选 `fs.watch`**：跨平台行为不一致（inotify vs FSEvents vs ReadDirectoryChangesW），且需要额外处理编辑器写文件的中间态。5s 轮询的开销是「每 5 秒读一个 <1KB 文件」，与 qwenwork 的项目决策一致。
+
+---
+
+## D-8: 为什么模型清单要自动发现，而不是硬编码？
+
+**背景**：最初的设计是硬编码默认模型清单（`GLM-5.2,GLM-5-Turbo`，抄自社区文档），由用户用 `ZCODE_MODELS` 覆盖。
+
+**问题**：2026-09 实测发现那份清单**已经过期**——上游 `client/configs` 的 `builtinModels` 现在是 `GLM-5.3` / `GLM-5.3-Flash`。硬编码的清单必然随上游迭代而失效，用户会看到「模型注册了但调不通」。
+
+**决策**：三级优先。
+
+```
+ZCODE_MODELS 显式配置  >  启动时从 client/configs 的 builtinModels 自动发现  >  内置默认值
+```
+
+**收益**：
+
+- 零配置可用：不写 `ZCODE_MODELS` 也能注册出正确的模型
+- 顺手复用了验证码本来就要调的那个接口（`configs.ts` 统一缓存），没有新增网络依赖
+- 自动发现失败时静默降级到内置默认值，不阻塞启动
+
+**为什么只取 `builtinModels` 不取 `providers[].models`**：后者是「自带 API Key」通道的清单（含 `GLM-5.2`/`GLM-5-Turbo`），混进来会注册出套餐里其实用不了的模型。
+
+**代价**：启动多一次网络请求（5s 超时，失败即降级）。
+
+---
+
+## D-9: 无痕验证被风控拒绝（F001）——为什么保留现状而不引入真实浏览器
+
+**背景**：D-3 决定求解器用 jsdom 跑阿里云 SDK。2026-09-22 实测发现：链路全通（SDK 加载 → 发起设备指纹请求 → 拿到 `certifyId`），但阿里云风险判定为
+`{"success":true,"verifyResult":false,"verifyCode":"F001"}`——**F001 = 疑似攻击请求，风险策略不通过**。
+
+试过 UA 伪装、`navigator.webdriver=false`、`window.chrome` / `screen` / canvas / WebGL 指纹桩、把 region 从过期的 `sgp` 改成上游公布的 `cn`：**全部仍是 F001**。
+
+**考虑过的方案**：
+
+| 方案 | 代价 | 判断 |
+|------|------|------|
+| 继续调 jsdom 指纹桩 | 无确定收敛路径，阿里云风控是异地黑盒 | ✗ |
+| 换成真实无头浏览器（Playwright/Puppeteer） | Chromium ~150MB 依赖；插件从「轻量桥接」变成「带浏览器」；风控同样可能识别无头特征 | 留作备选 |
+| 让用户手工提供 verifyParam | 该参数有时效性（社区实现按 45s 缓存），手工粘贴不可用 | ✗ |
+| 保留现状 + 如实记录 + 把 API Key 回退通道保留 | 无额外成本 | ✓ |
+
+**决策**：保留 jsdom 求解器（它对 API Key 路径无害，且一旦上游放开风控即可自动开始工作），
+**把 F001 作为已知限制明确写进 README / AGENTS / 逆向文档**，并保留 `api.z.ai` 回退通道作为可用出口。
+
+**为什么不做「假装能跑」**：一个静默失效的验证码链路比一个已知失效的更好看、但更糟——用户会花大量时间排查自己的账号。
+
+**何时重新审视**：若使用者提供真实账号并愿意承担 Playwright 依赖 → 换真实浏览器；
+或若上游 `builtinProviders` 里 `builtin:zai-coding-plan`（`baseUrl: https://api.z.ai/api/anthropic`）
+那条「套餐凭证走 api.z.ai、无需验证码」的路线被证实可行 → 直接删掉整个求解器。

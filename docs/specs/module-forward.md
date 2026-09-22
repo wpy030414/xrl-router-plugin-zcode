@@ -29,7 +29,7 @@
 
 ### 请求体
 
-- `model` 归一化为上游接受的形式（见 `module-models` 逻辑，在 `src/zcode/models.ts`）
+- `model` 归一化为上游接受的形式（规则与理由见 `docs/DECISIONS.md` D-4，实现见 `src/zcode/models.ts`）
 - `stream` **强制为 `true`**
 - 其余字段原样透传
 

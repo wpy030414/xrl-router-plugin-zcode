@@ -17,13 +17,13 @@
 | `ZCODE_PORT` | `19065` | 本地监听端口 |
 | `XRL_ROUTER_URL` | `http://localhost:19068` | router 地址，注册时替换 scheme 为 `ws` |
 | `ZCODE_KEYS` | 空 | 逗号分隔凭证；`.env` 为权威来源，回退进程环境变量 |
-| `ZCODE_MODELS` | `GLM-5.2,GLM-5-Turbo` | 注册给 router 的模型；支持 `模型ID=展示名` |
+| `ZCODE_MODELS` | 空 | 显式指定注册给 router 的模型；**留空则启动时自动发现**（见下）。支持 `模型ID=展示名` |
 | `ZCODE_BASE_URL` | `https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages` | JWT 主端点 |
 | `ZAI_FALLBACK_URL` | `https://api.z.ai/api/anthropic/v1/messages` | API Key 回退端点 |
 | `ZCODE_BILLING_BASE` | `https://zcode.z.ai/api/v1/zcode-plan` | 额度 / 计费查询基址 |
-| `ZCODE_CAPTCHA_CONFIG_URL` | `https://zcode.z.ai/api/v1/client/configs` | 验证码场景配置接口 |
+| `ZCODE_CAPTCHA_CONFIG_URL` | `https://zcode.z.ai/api/v1/client/configs` | 客户端配置接口（**不能带查询参数**） |
 | `ZCODE_CAPTCHA_SCENE` | `11xygtvd` | 场景 ID |
-| `ZCODE_CAPTCHA_REGION` | `sgp` | 场景区域 |
+| `ZCODE_CAPTCHA_REGION` | `cn` | 场景区域（上游当前公布值；社区旧文档的 `sgp` 已过期） |
 | `ZCODE_CAPTCHA_PREFIX` | `no8xfe` | 场景前缀 |
 | `ZCODE_CAPTCHA_TIMEOUT` | `40` | 单次求解超时（**秒**） |
 | `ZCODE_CAPTCHA_RETRIES` | `4` | 单次求解内部重试次数 |
@@ -40,6 +40,20 @@
 | `ZCODE_RECONNECT_BASE_MS` | `1000` | 重连退避基数 |
 | `ZCODE_RECONNECT_MAX_MS` | `60000` | 重连退避封顶 |
 | `ZCODE_OAUTH_BASE` | `https://zcode.z.ai/api/v1` | 仅 `scripts/login.ts` 读取 |
+
+### 模型清单的三级优先
+
+```
+ZCODE_MODELS 显式配置  >  client/configs 的 builtinModels 自动发现  >  内置默认 GLM-5.3,GLM-5.3-Flash
+```
+
+- 显式配置 → `modelsExplicit = true`，`modelsSource = "ZCODE_MODELS"`，启动不请求 configs
+- 未显式配置 → `startServer()` 在构造 `PluginClient` **之前** `await fetchClientConfigs()`，
+  成功则 `modelsSource = "上游 configs 自动发现（N 个）"`
+- 自动发现失败（网络/解析/字段缺失）→ 保留内置默认值，`modelsSource = "内置默认 (…)"`，不阻塞启动
+
+自动发现只取 `builtinModels`，不混入 `providers[].models`（后者是自带 API Key 通道的清单）。
+理由见 `docs/DECISIONS.md` D-8。
 
 ### 时间单位不统一是刻意的
 
@@ -59,16 +73,18 @@
 
 ## 边界条件
 
-- `ZCODE_MODELS` 为空或只含空白 → 回退内置默认值，并置 `modelsExplicit = false` 让启动横幅告警
-- `ZCODE_MODELS` 条目写成 `GLM-5.2=` → 展示名回退为 `model_id`
+- `ZCODE_MODELS` 为空或只含空白 → 走自动发现；发现失败再用内置默认值
+- `ZCODE_MODELS` 条目写成 `GLM-5.3=` → 展示名回退为 `model_id`
 - 数值变量写错（如 `abc`）→ 用 fallback，不崩溃
+- `client/configs` 带查询参数会被上游拒绝（`parameter error`）→ 插件**从不带参数**请求
 
 ## 验收标准
 
 - [x] `pnpm e2e` 全部用例都是在覆盖 `ZCODE_*` 环境变量后跑通的（证明覆盖生效）
 - [x] `ZCODE_SOLVER_PATH` 生效（e2e 用 `scripts/mock-solver.cjs` 替换真求解器）
 - [x] `ZCODE_MODELS=GLM-5.2=glm-5.2,GLM-5-Turbo` 被正确解析并注册
-- [x] 未配置 `ZCODE_MODELS` 时启动打印告警（已手工验证）
+- [x] `pnpm e2e` 第 9 节：configs 请求不带查询参数；自动发现的清单与去重正确；结果被缓存不重复请求
+- [x] 未配置 `ZCODE_MODELS` 时能对真实上游自动发现出模型（已实机验证）
 
 ## 完成定义
 

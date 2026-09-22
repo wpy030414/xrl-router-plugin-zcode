@@ -58,7 +58,10 @@ export interface Settings {
   xrlRouterUrl: string;
 
   models: ModelSpec[];
+  /** `ZCODE_MODELS` 是否被显式配置（未配置时启动会尝试从上游自动发现） */
   modelsExplicit: boolean;
+  /** 模型清单的来源描述，供启动横幅展示 */
+  modelsSource: string;
 
   /** Coding Plan（JWT）主端点 */
   zcodeBaseUrl: string;
@@ -105,6 +108,7 @@ export const settings: Settings = {
 
   models,
   modelsExplicit,
+  modelsSource: modelsExplicit ? 'ZCODE_MODELS' : `内置默认 (${DEFAULT_MODELS})`,
 
   zcodeBaseUrl: env(
     'ZCODE_BASE_URL',
@@ -122,7 +126,8 @@ export const settings: Settings = {
 
   captcha: {
     sceneId: env('ZCODE_CAPTCHA_SCENE', '11xygtvd'),
-    region: env('ZCODE_CAPTCHA_REGION', 'sgp'),
+    // 上游 configs 接口当前公布的 region 是 cn（社区旧文档里的 sgp 已过期）
+    region: env('ZCODE_CAPTCHA_REGION', 'cn'),
     prefix: env('ZCODE_CAPTCHA_PREFIX', 'no8xfe'),
     timeoutMs: intEnv('ZCODE_CAPTCHA_TIMEOUT', 40) * 1000,
     retries: intEnv('ZCODE_CAPTCHA_RETRIES', 4),

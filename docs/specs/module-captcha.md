@@ -28,13 +28,16 @@ getVerifyParam()
 3. 全部失败 → 抛错（调用方映射为 502）
 ```
 
-### 场景配置拉取
+### 场景配置来源
+
+由 `src/zcode/configs.ts` 统一提供（与模型自动发现共用同一个接口与缓存）：
 
 | 来源 | 优先级 |
 |------|--------|
-| `ZCODE_CAPTCHA_SCENE` / `_REGION` / `_PREFIX` 环境变量 | 内置默认值，始终可用 |
-| `GET {ZCODE_CAPTCHA_CONFIG_URL}?app_version=…&platform=…` → `data.configs.captcha` | 优先尝试 |
+| `GET {ZCODE_CAPTCHA_CONFIG_URL}` → `data.configs.captcha` | 优先尝试 |
+| `ZCODE_CAPTCHA_SCENE` / `_REGION` / `_PREFIX` 环境变量 | 兜底，始终可用 |
 
+- **请求不得携带任何查询参数**——带上 `?app_version=…` 上游返回 `{"code":3001,"msg":"parameter error"}`
 - 成功 → 缓存 `ZCODE_CAPTCHA_CONFIG_CACHE_TTL`（默认 600s）
 - 失败 → 回退环境变量值，并做 **60s 负缓存**（避免每个请求都陪一次超时）
 - `ZCODE_CAPTCHA_REMOTE=0` → 完全不请求远端，只用环境变量
@@ -61,6 +64,18 @@ getVerifyParam()
 - 求解器**必须**以子进程运行——jsdom 需要 `runScripts: 'dangerously'` 跑混淆 SDK，隔离出去才能超时强杀、崩溃不波及主进程
 - 求解器路径可由 `ZCODE_SOLVER_PATH` 覆盖（e2e 用假求解器替换的前提）
 - 单次求解超时 `ZCODE_CAPTCHA_TIMEOUT`（默认 40s）到期强杀（SIGKILL）
+- `configs` 接口请求**不得带查询参数**
+
+## ⚠️ 已知阻塞：风控返回 F001
+
+2026-09-22 实测：求解链路全通（SDK 加载 → 设备指纹请求 → 拿到 `certifyId`），但阿里云风险判定为
+`{"success":true,"verifyResult":false,"verifyCode":"F001"}`（疑似攻击请求）。
+
+本模块的**代码行为仍然正确**（超时会重试、失败会抛错、上层映射 502、缓存与去重都按规格工作），
+但**在当前环境下拿不到可用的 verifyParam**。缓解尝试与出路见
+`docs/reverse/ZCODE_REVERSE.md` 第 6.5 节与 `docs/DECISIONS.md` D-9。
+
+因此本模块的验收以「机制正确」为准，而非「当前能取到参数」。
 
 ## 边界条件
 

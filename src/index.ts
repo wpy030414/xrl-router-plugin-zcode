@@ -15,6 +15,7 @@ import express, { type Express, type Request, type Response } from 'express';
 import { PLUGIN_ID, PROVIDER_API_PATH, PROVIDER_KIND, settings } from './config';
 import { PluginClient, readKeysFromEnv } from './pluginClient';
 import { killPortProcess } from './port';
+import { fetchClientConfigs } from './zcode/configs';
 import { MAX_CAPTCHA_REFRESH } from './zcode/client';
 import { forwardMessages } from './zcode/client';
 import { classifySecret } from './zcode/auth';
@@ -76,6 +77,20 @@ export function createApp(): Express {
   return app;
 }
 
+/**
+ * 模型清单解析：显式配置优先，否则问上游 configs 接口要（拿不到就用内置默认）。
+ * 必须在构造 PluginClient 之前完成——注册载荷里的 models 在那一刻定型。
+ */
+async function resolveModels(): Promise<void> {
+  if (settings.modelsExplicit) return;
+
+  const configs = await fetchClientConfigs();
+  if (configs && configs.models.length > 0) {
+    settings.models = configs.models;
+    settings.modelsSource = `上游 configs 自动发现（${configs.models.length} 个）`;
+  }
+}
+
 /** 打印启动配置摘要 + 提醒配置缺口 */
 function printBanner(): void {
   const keys = readKeysFromEnv();
@@ -86,13 +101,14 @@ function printBanner(): void {
   console.log(`  监听      http://localhost:${settings.port}${PROVIDER_API_PATH}`);
   console.log(`  注册      注册为 ${PROVIDER_KIND} 供应商 → ${settings.xrlRouterUrl}`);
   console.log(`  上游      ${settings.zcodeBaseUrl}`);
-  console.log(`  模型      ${settings.models.map((m) => `${m.modelId}(→${m.displayName})`).join(', ')}`);
+  console.log(`  模型源    ${settings.modelsSource}`);
+  console.log(`  模型      ${settings.models.map((m) => (m.displayName === m.modelId ? m.modelId : `${m.modelId}(→${m.displayName})`)).join(', ')}`);
   console.log(`  密钥      ${keys.length} 项（JWT ${jwtCount} / 其他 ${keys.length - jwtCount}）`);
   console.log('');
 
   if (!settings.modelsExplicit) {
-    console.warn('  ⚠ 未配置 ZCODE_MODELS，已回退内置默认值。');
-    console.warn('    ZCode 上游的模型名【大小写敏感】，请确认后写进 .env。');
+    console.log('  ℹ 未配置 ZCODE_MODELS，已按上游公布的清单注册。');
+    console.log('    如需自定义别名，在 .env 写 ZCODE_MODELS=GLM-5.3=glm-5.3,...');
   }
   if (keys.length === 0) {
     console.warn(`  ⚠ ZCODE_KEYS 为空，尚无密钥可注册给 xrl-router。先跑 pnpm login。`);
@@ -104,6 +120,7 @@ export async function startServer(options: { port?: number } = {}): Promise<Runn
   const app = createApp();
 
   await killPortProcess(port);
+  await resolveModels();
 
   const server = await new Promise<Server>((resolve, reject) => {
     const s = app.listen(port, '0.0.0.0', () => resolve(s));

@@ -37,20 +37,43 @@ pnpm serve
 
 启动后在 xrl-router 界面确认插件上线 → 添加供应商 → 用注册的模型别名调用。
 
-首次启动会打印警告，提醒你确认 `ZCODE_MODELS`——**ZCode 上游的模型名大小写敏感**，请在 `.env` 里写明。
+模型清单**默认自动发现**（从上游 `/api/v1/client/configs` 的 `builtinModels`），不写 `ZCODE_MODELS` 也能用。
+想自定义别名再在 `.env` 里写。
 
 ```bash
 curl http://localhost:19065/health
 ```
 
+## ⚠️ 已知阻塞：Coding Plan 路径暂时不可用
+
+**如果你打算用 Coding Plan（JWT）凭证，请先读这一节。**
+
+ZCode 的 Coding Plan 端点要求一个由阿里云「无痕验证」签发的请求头。本插件用 Node + jsdom
+跑阿里云官方 SDK 来求这个参数，链路本身是通的（SDK 加载 → 设备指纹请求 → 拿到 `certifyId`），
+但阿里云风控当前判定为 **`verifyCode: F001`（疑似攻击请求，风险策略不通过）**。
+
+已尝试且**均无效**：伪装 Chrome UA、`navigator.webdriver=false`、补齐 `chrome`/`screen`/canvas/WebGL
+指纹、把 region 从过期的 `sgp` 改成上游公布的 `cn`。
+
+| 路径 | 状态 |
+|------|------|
+| Coding Plan（JWT，需无痕验证） | ❌ 被风控拒绝，拿不到 verifyParam |
+| API Key 回退通道（`api.z.ai`，无需验证码） | ✅ 正常 |
+
+结论：**本插件当前实质上只有 API Key 通道可用**。详见
+[docs/reverse/ZCODE_REVERSE.md](./docs/reverse/ZCODE_REVERSE.md) 第 6.5 节与
+[docs/DECISIONS.md](./docs/DECISIONS.md) D-9（含备选出路：换真实无头浏览器、
+或验证 `builtin:zai-coding-plan` 那条「套餐凭证走 api.z.ai」的免验证码路线）。
+
 ## 当前状态
 
-- **阶段**：开发中。核心链路（转发 / 聚合 / 错误映射 / 验证码缓存）由 `pnpm e2e` 的 42 条离线断言覆盖并全绿。
+- **阶段**：开发中。转发 / 聚合 / 错误映射 / 验证码缓存与刷新 / 注册载荷 / 模型自动发现
+  由 `pnpm e2e` 的 47 条离线断言覆盖并全绿。
 - **已知限制**：
-  - 模型清单需要手动填写（`ZCODE_MODELS`），未做上游动态拉取
-  - 无痕验证依赖阿里云混淆 SDK 的浏览器指纹行为；若上游更新指纹逻辑，`captcha/solver.cjs` 的桩件需同步调整
+  - **Coding Plan 路径被阿里云风控拒绝（F001），见上一节**
+  - 无痕验证依赖阿里云混淆 SDK 的浏览器指纹行为；上游更新指纹逻辑时桩件需同步
   - 额度 / 计费字段结构基于社区观测，不同套餐可能有差异
-  - 无真实 Coding Plan 账号时的端到端验证需使用者自行完成
+  - 无真实账号时的端到端验证需使用者自行完成
 
 ## 核心技术
 

@@ -92,6 +92,8 @@ function buildSseFrames(model: string): string[] {
 interface MockUpstream {
   port: number;
   records: RecordedRequest[];
+  /** 上游 configs 接口被请求过的原始 URL（用于断言「不能带查询参数」） */
+  configUrls: string[];
   /** 只对第一个 captcha 场景返回 403，用于验证「刷新后重试成功」 */
   resetCaptchaOnce: () => void;
   close: () => Promise<void>;
@@ -99,6 +101,7 @@ interface MockUpstream {
 
 async function startMockUpstream(): Promise<MockUpstream> {
   const records: RecordedRequest[] = [];
+  const configUrls: string[] = [];
   let captchaOnceLeft = 0;
 
   const server = http.createServer((req, res) => {
@@ -109,8 +112,9 @@ async function startMockUpstream(): Promise<MockUpstream> {
     req.on('end', () => {
       const url = req.url || '';
 
-      // 验证码场景配置接口
+      // 验证码场景配置接口 + 模型清单自动发现接口（同一个端点）
       if (url.startsWith('/configs')) {
+        configUrls.push(url);
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(
           JSON.stringify({
@@ -119,6 +123,18 @@ async function startMockUpstream(): Promise<MockUpstream> {
               configs: {
                 captcha: { sceneId: 'mock-scene', region: 'mock-region', prefix: 'mock-prefix' },
               },
+              builtinModels: [
+                { modelId: 'GLM-5.3', name: 'GLM-5.3' },
+                { modelId: 'GLM-5.3-Flash', name: 'GLM-5.3-Flash' },
+                { modelId: 'GLM-5.3', name: 'GLM-5.3（重复项，用于验证去重）' },
+              ],
+              providers: [
+                {
+                  id: 'z-ai',
+                  schema: 'anthropic',
+                  models: [{ modelId: 'GLM-5.3' }, { modelId: 'GLM-5.2' }],
+                },
+              ],
             },
           }),
         );
@@ -171,6 +187,7 @@ async function startMockUpstream(): Promise<MockUpstream> {
   return {
     port,
     records,
+    configUrls,
     resetCaptchaOnce: () => {
       captchaOnceLeft = 1;
     },
@@ -276,6 +293,7 @@ async function main(): Promise<void> {
   /* eslint-disable @typescript-eslint/no-var-requires */
   const { createApp } = require('../src/index') as typeof import('../src/index');
   const { PluginClient } = require('../src/pluginClient') as typeof import('../src/pluginClient');
+  const { fetchClientConfigs } = require('../src/zcode/configs') as typeof import('../src/zcode/configs');
 
   const app = createApp();
   const server = await new Promise<http.Server>((resolve) => {
@@ -471,6 +489,27 @@ async function main(): Promise<void> {
     const hbAfter = router.messages.filter((m) => m.type === 'heartbeat').length;
     check('心跳按周期持续发送（1s 内 ≥2 次）', hbAfter - hbBefore >= 2,
       `实际 ${hbAfter - hbBefore} 次`);
+
+    // ── 9. 上游配置接口（验证码场景 + 模型自动发现）──────────────────────────
+    section('9. 上游 configs 接口');
+
+    check('请求 configs 接口时不携带任何查询参数',
+      upstream.configUrls.length > 0 && upstream.configUrls.every((u) => !u.includes('?')),
+      JSON.stringify(upstream.configUrls));
+
+    const configs = await fetchClientConfigs();
+    check('自动发现取到上游模型清单',
+      JSON.stringify(configs?.models.map((m) => m.modelId)) ===
+        JSON.stringify(['GLM-5.3', 'GLM-5.3-Flash']),
+      JSON.stringify(configs?.models));
+    check('builtinModels 优先、去重保序，且不混入 providers 的清单',
+      configs?.models.length === 2 && configs?.models[0]?.modelId === 'GLM-5.3',
+      JSON.stringify(configs?.models));
+    check('同一接口也提供验证码场景参数',
+      configs?.captcha?.sceneId === 'mock-scene' && configs?.captcha?.region === 'mock-region',
+      JSON.stringify(configs?.captcha));
+    check('configs 结果被缓存（不重复请求上游）',
+      upstream.configUrls.length === 1, `实际请求 ${upstream.configUrls.length} 次`);
 
     pluginClient.close();
   } finally {

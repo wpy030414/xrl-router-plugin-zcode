@@ -18,8 +18,13 @@ export interface ModelSpec {
   displayName: string;
 }
 
-/** 未配置 `ZCODE_MODELS` 时的内置回退清单（仅供可运行，不代表上游真实可用集） */
-export const DEFAULT_MODELS = 'GLM-5.2,GLM-5-Turbo';
+/**
+ * 未配置 `ZCODE_MODELS` 且自动发现也失败时的内置回退清单。
+ *
+ * 取值来自上游 `GET /api/v1/client/configs` 的 `builtinModels`（2026-09 观测），
+ * 仅作「可运行」的保底——正常情况下应由 `ZCODE_MODELS` 或自动发现提供。
+ */
+export const DEFAULT_MODELS = 'GLM-5.3,GLM-5.3-Flash';
 
 /**
  * 解析 `ZCODE_MODELS` 字符串。

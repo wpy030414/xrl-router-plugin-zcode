@@ -15,6 +15,11 @@
  *
  * 注意：jsdom 需要 `runScripts: 'dangerously'` 才能跑混淆后的 SDK，
  *       所以本脚本始终以**子进程**方式被调用，崩溃不波及插件主进程。
+ *
+ * ⚠️ 现状（2026-09 观测）：SDK 能正常加载、能拿到 certifyId、能走完验证流程，
+ *    但阿里云风控返回 `verifyResult:false, verifyCode:"F001"`（疑似攻击请求，
+ *    风险策略不通过）。补齐 UA / navigator 指纹未改变该结果。详见
+ *    docs/reverse/ZCODE_REVERSE.md 第 6.5 节。
  */
 
 const { JSDOM, VirtualConsole } = require('jsdom');
@@ -47,7 +52,32 @@ const dom = new JSDOM(html, {
   resources: 'usable',
   pretendToBeVisual: true,
   virtualConsole,
+  // jsdom 默认 UA 里带 "jsdom" 字样，风控一眼识别；换成真实 Chrome UA
+  userAgent:
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   beforeParse(window) {
+    // ── 反自动化指纹补齐（尽力而为，见 docs/reverse/ZCODE_REVERSE.md 的 F001 说明）──
+    Object.defineProperty(window.navigator, 'webdriver', { get: () => false });
+    Object.defineProperty(window.navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+    Object.defineProperty(window.navigator, 'language', { get: () => 'zh-CN' });
+    Object.defineProperty(window.navigator, 'platform', { get: () => 'Win32' });
+    Object.defineProperty(window.navigator, 'hardwareConcurrency', { get: () => 8 });
+    window.chrome = window.chrome || { runtime: {}, app: { isInstalled: false } };
+    for (const [k, v] of Object.entries({
+      width: 1920,
+      height: 1080,
+      availWidth: 1920,
+      availHeight: 1040,
+      colorDepth: 24,
+      pixelDepth: 24,
+    })) {
+      try {
+        Object.defineProperty(window.screen, k, { get: () => v, configurable: true });
+      } catch {
+        /* 某些 jsdom 版本 screen 属性不可覆盖，忽略 */
+      }
+    }
+
     // matchMedia 桩
     window.matchMedia = () => ({
       matches: false,
