@@ -44,36 +44,44 @@ pnpm serve
 curl http://localhost:19065/health
 ```
 
-## ⚠️ 已知阻塞：Coding Plan 路径暂时不可用
+## 两条凭证路线
 
-**如果你打算用 Coding Plan（JWT）凭证，请先读这一节。**
+ZCode 的 Coding Plan 额度有**两条**可用路线，本插件默认走免验证码的那条：
 
-ZCode 的 Coding Plan 端点要求一个由阿里云「无痕验证」签发的请求头。本插件用 Node + jsdom
-跑阿里云官方 SDK 来求这个参数，链路本身是通的（SDK 加载 → 设备指纹请求 → 拿到 `certifyId`），
-但阿里云风控当前判定为 **`verifyCode: F001`（疑似攻击请求，风险策略不通过）**。
+| 路线 | 凭证 | 端点 | 无痕验证 | 状态 |
+|------|------|------|:---:|------|
+| **A（默认）** OAuth 兑换 | `apiKeyId.secretKey`（长期 API Key） | `api.z.ai/api/anthropic` | ❌ 不需要 | ✅ 逆向自官方客户端，端点实测存活 |
+| **B（兜底）** Coding Plan JWT | 三段点分 JWT | `zcode.z.ai/.../zcode-plan/anthropic` | ✅ 需要 | ⚠️ 被风控拒（F001） |
+
+`pnpm login` 默认走 **路线 A**：OAuth 授权后，把 `access_token` 兑换成一个名为
+`zcode-api-key` 的长期 API Key，用它打 `api.z.ai`——**全程不碰无痕验证**。
+这正是 ZCode 官方客户端自己在用的链路（逆向自本机 `app.asar`）。
+
+兑换失败时自动回退保存 JWT（路线 B），并告警该形态需要无痕验证。
+
+## ⚠️ 路线 B（JWT + 无痕验证）当前被风控拒
+
+如果你手上只有 Coding Plan 的 JWT、走路线 B，请注意：ZCode 的 zcode-plan 端点要求一个
+阿里云「无痕验证」签发的请求头。本插件用 Node + jsdom 跑阿里云官方 SDK 求这个参数，
+链路本身是通的（SDK 加载 → 设备指纹请求 → 拿到 `certifyId`），但阿里云风控当前判定为
+**`verifyCode: F001`（疑似攻击请求，风险策略不通过）**。
 
 已尝试且**均无效**：伪装 Chrome UA、`navigator.webdriver=false`、补齐 `chrome`/`screen`/canvas/WebGL
 指纹、把 region 从过期的 `sgp` 改成上游公布的 `cn`。
 
-| 路径 | 状态 |
-|------|------|
-| Coding Plan（JWT，需无痕验证） | ❌ 被风控拒绝，拿不到 verifyParam |
-| API Key 回退通道（`api.z.ai`，无需验证码） | ✅ 正常 |
-
-结论：**本插件当前实质上只有 API Key 通道可用**。详见
-[docs/reverse/ZCODE_REVERSE.md](./docs/reverse/ZCODE_REVERSE.md) 第 6.5 节与
-[docs/DECISIONS.md](./docs/DECISIONS.md) D-9（含备选出路：换真实无头浏览器、
-或验证 `builtin:zai-coding-plan` 那条「套餐凭证走 api.z.ai」的免验证码路线）。
+**所以路线 B 当前拿不到可用的 verifyParam，请求会返回 502。请优先用路线 A（`pnpm login` 默认即是）。**
+详见 [docs/reverse/ZCODE_REVERSE.md](./docs/reverse/ZCODE_REVERSE.md) 第 6.5 节与
+[docs/DECISIONS.md](./docs/DECISIONS.md) D-9 / D-10。
 
 ## 当前状态
 
-- **阶段**：开发中。转发 / 聚合 / 错误映射 / 验证码缓存与刷新 / 注册载荷 / 模型自动发现
-  由 `pnpm e2e` 的 47 条离线断言覆盖并全绿。
+- **阶段**：开发中。转发 / 聚合 / 错误映射 / 兑换链 / 模型自动发现 / 注册载荷
+  由 `pnpm e2e` 的 52 条离线断言覆盖并全绿。
 - **已知限制**：
-  - **Coding Plan 路径被阿里云风控拒绝（F001），见上一节**
-  - 无痕验证依赖阿里云混淆 SDK 的浏览器指纹行为；上游更新指纹逻辑时桩件需同步
+  - **路线 A 的「兑换出的 key 确实消耗 Coding Plan 订阅额度」这一点，已逆向确证官方如此使用，
+    但尚未用真实付费/订阅账号端到端跑通**（本仓库无真实凭证）。见 `docs/reverse` 第 7 节
+  - 路线 B（JWT + 无痕验证）被阿里云风控拒绝（F001），见上一节
   - 额度 / 计费字段结构基于社区观测，不同套餐可能有差异
-  - 无真实账号时的端到端验证需使用者自行完成
 
 ## 核心技术
 

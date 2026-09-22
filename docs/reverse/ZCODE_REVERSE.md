@@ -72,21 +72,70 @@ Coding Plan（JWT）模式**必需**，API Key 模式不需要。
 
 ## 4. 凭证与登录
 
+> 本节大量结论来自 **【本机逆向】**：`%LOCALAPPDATA%/Programs/ZCode/resources/glm/zcode.cjs`
+> （ZCode 桌面端 3.5.3 的 14MB 打包 bundle）。关键函数名一并给出，便于复核。
+
 - **Coding Plan 凭证** = OAuth 产出的 JWT，三段点分（`a.b.c`）。本插件以此作为形态判据。
-- **登录流程**（`pnpm login`，`scripts/login.ts`）：
+- **官方对 Coding Plan 额度的真实用法不是打 zcode-plan 端点**，而是把 OAuth `access_token`
+  兑换成一个长期 API Key，再打 api.z.ai（免无痕验证）。见下。
 
-  ```
-  POST /oauth/cli/init   Authorization: Bearer <临时 poll token>   {"provider":"zai"}
-        → { flow_id, authorize_url }
-  浏览器完成授权
-  GET  /oauth/cli/poll/{flow_id}   Authorization: Bearer <同一个 poll token>
-        → status: pending | ready | failed
-        ready 时 data.token 即 Coding Plan JWT
-  ```
+### 4.1 OAuth 登录流程（`createZaiCliOAuthClient` / `Xun`）
 
-- 轮询用的临时 token 由本地随机生成，与最终凭证无关。
-- zcode2api 在 `ready` 后还会走一条 `api.z.ai` 的兑换链把 OAuth `access_token` 换成付费 API Key。
-  **本插件不做这一步**（见 `AGENTS.md` 的 Non Goals）。
+```
+本地生成 pollToken = randomBytes(32).hex
+POST {oauthBase}/oauth/cli/init   Authorization: Bearer <pollToken>   {"provider":"zai"}
+     → data: { flow_id, authorize_url, poll_token, expires_at, poll_interval_sec }
+浏览器完成授权
+GET  {oauthBase}/oauth/cli/poll/{flow_id}   Authorization: Bearer <pollToken>
+     → status: pending | failed | ready
+     ready 时 data = { token: <CodingPlan JWT>, zai: { access_token }, user: {...} }
+```
+
+- `oauthBase` 默认 `https://zcode.z.ai/api/v1`（bundle 里 `J5s`）
+- 轮询用的临时 `pollToken` 由本地随机生成，与最终凭证无关
+- 轮询间隔取 `max(Fqa, poll_interval_sec*1000)`，超时取 `min(now+timeout, expires_at*1000)`
+
+### 4.2 ★ 兑换链：access_token → api.z.ai API Key（`createCodingPlanApiKeyResolver` / `ZJr`）
+
+**这是绕开无痕验证 F001 的关键路线**，官方客户端 `resolveCodingPlanApiKey`（`nWo`）实际调用：
+
+```
+输入：OAuth ready 里的 zai.access_token（注意：不是 JWT！family="zai"）
+
+1. resolveZaiBizToken (V5s)：
+   POST https://api.z.ai/api/auth/z/login   {token: access_token}
+     → data.access_token（业务 token，下称 bizToken）
+
+2. resolveBizApiKey (GJr)：authorization = `Bearer ${bizToken}`，host = https://api.z.ai
+   GET  /api/biz/customer/getCustomerInfo
+     → pickOrgAndProject (H5s)：机构里挑名字含「默认机构」的（否则第一个），
+       项目里挑名字含「默认项目」的（否则第一个）
+   GET  /api/biz/v1/organization/{orgId}/projects/{projId}/api_keys
+     → 找 name === "zcode-api-key" 的项；没有则 POST 同 URL {name:"zcode-api-key"} 创建
+     → 取 apiKeyId = item.apiKey
+   GET  /api/biz/v1/organization/{orgId}/projects/{projId}/api_keys/copy/{apiKeyId}
+     → data.secretKey
+   ⇒ 返回 `${apiKeyId}.${secretKey}`
+```
+
+- 上游业务信封：`{code, msg, data}`，`code` 为 `null/0/200/"0"/"200"` 视为成功（`isSuccessfulRemoteCode` / `G5s`）
+- 关键常量（bundle）：`JJr="https://api.z.ai"`、`HJr="zcode-api-key"`、`q5s="默认机构"`、`W5s="默认项目"`
+- **【实测】** 兑换链 4 端点用假 token 探活全部存活：
+  - `POST /api/auth/z/login {token:fake}` → HTTP 200 `{code:500,msg:"Z.ai user information is invalid"}`
+  - `GET /api/biz/customer/getCustomerInfo`（无 auth）→ `{code:1001,msg:"Authentication parameter not received"}`
+  - 同端点（假 biz token）→ `{code:401,msg:"token expired or incorrect"}`
+
+### 4.3 兑换出的 key 如何推理
+
+- 兑换结果 `apiKeyId.secretKey` 只有 **1 个点** → 本插件 `classifySecret` 判为 `apiKey`
+  → 自动走 `ZAI_FALLBACK_URL`（`https://api.z.ai/api/anthropic/v1/messages`），**免无痕验证**
+- 佐证：`builtinProviders` 里 `builtin:zai-coding-plan` 的 `baseUrl` 正是 `https://api.z.ai/api/anthropic`
+- **【实测】** 该端点用假 key 返回 `401 {message:"token expired or incorrect"}`，把值当 token 解析，不要求验证码头
+
+### 4.4 zcode2api 的对应实现
+
+zcode2api 的 `app/oauth.py::exchange_api_key` 是同一条链（`z/login → getCustomerInfo →
+api_keys → copy`）。本插件的 `src/zcode/exchange.ts` 与之等价，但**默认启用**（zcode2api 里是可选步骤）。
 
 ## 5. 模型清单
 
@@ -154,13 +203,19 @@ API Key 路径不受影响（`api.z.ai` 回退端点不需要验证码）。
 
 ## 7. 未验证 / 存疑事项
 
+- **【头号】兑换 key 的计费归属未端到端确证**：逆向证明官方把 Coding Plan 的 access_token
+  兑换成 `zcode-api-key` 打 api.z.ai，但**无法证明这把 key 消耗的是订阅额度还是另计的 API 余额**。
+  需要一个真实订阅账号端到端跑通（`pnpm login` → `pnpm serve` → 发一条请求 → 查
+  `billing/balance` 是否扣减）才能确认。这是路线 A 成立与否的最后一环。
 - `billing/current`、`billing/balance`、`usage` 的字段结构（`total_units` / `used_units` /
   `remaining_units` / `expires_at` 等）来自转述，不同套餐可能不一致
 - 额度耗尽的判定关键词为启发式
-- `builtinProviders` 里 `builtin:zai-coding-plan` 的 `baseUrl` 是 `https://api.z.ai/api/anthropic`
-  ——**可能存在一条「用套餐凭证打 api.z.ai、无需验证码」的通道**，但社区未见此路线的公开结论，
-  本仓库无账号可验证。若成立，将完全绕开第 6.5 节的阻塞
+- `builtinProviders` 里 `builtin:zai-coding-plan`（`baseUrl: https://api.z.ai/api/anthropic`）
+  已被本机逆向证实为官方 Coding Plan 路线（见第 4.2 节），不再是存疑项
 - 无痕验证 SDK 的指纹逻辑（feilin / cloudauth-device）会持续更新，jsdom 桩件需要同步
+  （但只要路线 A 可用，求解器就是兜底而非主路径）
+- OAuth ready 载荷里 `zai.access_token` 的有效期未测——若它比 JWT 短很多，兑换需更频繁；
+  但兑换出的是**长期** API Key，正常只需兑换一次
 
 ## 8. 致谢与许可
 

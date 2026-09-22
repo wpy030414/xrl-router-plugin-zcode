@@ -202,3 +202,58 @@ ZCODE_MODELS 显式配置  >  启动时从 client/configs 的 builtinModels 自�
 **何时重新审视**：若使用者提供真实账号并愿意承担 Playwright 依赖 → 换真实浏览器；
 或若上游 `builtinProviders` 里 `builtin:zai-coding-plan`（`baseUrl: https://api.z.ai/api/anthropic`）
 那条「套餐凭证走 api.z.ai、无需验证码」的路线被证实可行 → 直接删掉整个求解器。
+
+---
+
+## D-10: 改走「OAuth 兑换 API Key」官方路线，绕开无痕验证（承接 D-9 的出路）
+
+**背景**：D-9 结尾留了一条出路——若 `builtin:zai-coding-plan` 的免验证码路线成立，就删掉整个求解器。
+本机装有 ZCode 桌面端，直接逆向它的打包产物拿到了**决定性证据**。
+
+**逆向来源**：`%LOCALAPPDATA%/Programs/ZCode/resources/glm/zcode.cjs`（14MB 打包 bundle）。
+关键函数：`createZaiCliOAuthClient`（OAuth）、`createCodingPlanApiKeyResolver`（兑换）、
+`resolveZaiBizToken`、`resolveBizApiKey`、`pickOrgAndProject`。
+
+**逆向出的官方真实链路**：
+
+```
+OAuth 授权 → poll ready 返回 { token: JWT, zai: { access_token } }
+  ↓ 用 access_token（不是 JWT！）
+POST api.z.ai/api/auth/z/login {token}                    → biz token
+GET  api.z.ai/api/biz/customer/getCustomerInfo            → 默认机构 / 默认项目
+GET/POST api.z.ai/.../organization/{o}/projects/{p}/api_keys  找/建 "zcode-api-key"
+GET  .../api_keys/copy/{apiKeyId}                         → secretKey
+  ⇒ 长期密钥 `${apiKeyId}.${secretKey}`
+  ↓
+POST api.z.ai/api/anthropic/v1/messages   x-api-key: apiKeyId.secretKey   ★ 无无痕验证
+```
+
+**决定性事实**：
+
+1. 官方对 Coding Plan 额度走的是 **api.z.ai**，不是 zcode-plan + 无痕验证。`builtinProviders`
+   里 `builtin:zai-coding-plan` 的 `baseUrl` 正是 `https://api.z.ai/api/anthropic`，闭环。
+2. 无痕验证（`X-Aliyun-Captcha-Verify-Param`）在 bundle 里只绑定 `{plan_id}` 的**套餐激活**请求，
+   以及 zcode-plan provider 的可选 runtime headers——**不在推理主路径**。
+3. 兑换链 4 个端点用假 token 实测**全部存活**（z/login→`code:500`、getCustomerInfo→`code:1001`/`401`）。
+
+**决策**：`pnpm login` 默认走兑换链，把 OAuth `access_token` 换成 `apiKeyId.secretKey` 存进
+`.env`。转发层**无需改动**——`classifySecret` 早已把「非三段点分」判为 apiKey，自动走
+`ZAI_FALLBACK_URL`（api.z.ai）免验证码分支。兑换失败时回退存 JWT（路线 B）并告警。
+
+**为什么这样最优**：
+
+- 转发层零改动，改动面收敛在 `login.ts` + 新增 `exchange.ts`
+- 运行时**零客户端依赖**——兑换链是纯 HTTP，逆向只是用来搞清楚协议，最终产物不需要装 ZCode
+- 绕开了整个 F001 死结，不引入 Chromium 依赖
+- 与官方行为一致，上游改版的抗性比自建验证码方案强
+
+**为什么不删求解器**：路线 B（JWT）仍保留为兜底——万一某账户兑换不出 key（无默认机构/项目），
+还能退回 JWT。求解器代码留着，一旦阿里云放开风控即自动可用。这与 AGENTS.md「不删 API Key 回退通道」
+是同一种保守取向。
+
+**仍未确证的一环（诚实标注）**：「兑换出的 `apiKeyId.secretKey` 消耗的确实是 Coding Plan **订阅额度**
+而非另计的 API 余额」——这一点逆向只能证明**官方这么用**，无法证明计费归属。需要一个真实订阅账号
+端到端跑通才能确认。见 `docs/reverse/ZCODE_REVERSE.md` 第 7 节，已列为头号待验证项。
+
+**何时重新审视**：真实账号验证后，若确认兑换 key 走的不是订阅额度 → 退回 D-9 的路线 B 攻坚；
+若确认是订阅额度 → 可考虑把求解器与 zcode-plan 分支整体降级为可选/删除。
