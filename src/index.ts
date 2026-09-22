@@ -112,6 +112,11 @@ function printBanner(): void {
   }
   if (keys.length === 0) {
     console.warn(`  ⚠ ZCODE_KEYS 为空，尚无密钥可注册给 xrl-router。先跑 pnpm login。`);
+  } else if (jwtCount === keys.length) {
+    // 与其让使用者对着 502 排查半天，不如在启动时就把已知阻塞说清楚
+    console.warn('  ⚠ 当前全部密钥都是 Coding Plan JWT，而该通道正被阿里云风控拒绝（F001）。');
+    console.warn('    这些密钥的请求会返回 502。详见 README「已知阻塞」一节。');
+    console.warn('    想立刻可用：改配 Z.AI API Key（走 api.z.ai 回退端点，无需无痕验证）。');
   }
 }
 
