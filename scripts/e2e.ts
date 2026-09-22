@@ -260,6 +260,91 @@ async function startMockRouter(): Promise<MockRouter> {
   };
 }
 
+// ── Mock api.z.ai（兑换链：z/login → getCustomerInfo → api_keys → copy）──────
+
+interface MockZaiApi {
+  port: number;
+  hits: string[];
+  close: () => Promise<void>;
+}
+
+const EXCHANGED_KEY_ID = 'mockkeyid123';
+const EXCHANGED_SECRET = 'mocksecret456';
+
+async function startMockZaiApi(): Promise<MockZaiApi> {
+  const hits: string[] = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => {
+      raw += c;
+    });
+    req.on('end', () => {
+      const url = req.url || '';
+      hits.push(`${req.method} ${url}`);
+      const json = (data: any): void => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ code: 0, msg: '', data, success: true }));
+      };
+
+      // 1. OAuth access_token → biz token
+      if (url === '/api/auth/z/login') {
+        const body = JSON.parse(raw || '{}');
+        if (body.token !== 'mock-oauth-access-token') return json(null);
+        return json({ access_token: 'mock-biz-token' });
+      }
+      // 2. getCustomerInfo → 默认机构/项目（需 biz token）
+      if (url === '/api/biz/customer/getCustomerInfo') {
+        if (req.headers.authorization !== 'Bearer mock-biz-token') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ code: 401, msg: 'token expired or incorrect', success: false }));
+        }
+        return json({
+          organizations: [
+            { organizationId: 'org-1', organizationName: '我的默认机构', projects: [
+              { projectId: 'proj-1', projectName: '默认项目' },
+              { projectId: 'proj-2', projectName: '其他项目' },
+            ] },
+          ],
+        });
+      }
+      // 3/4. api_keys 列表 / 创建 / copy
+      const keysMatch = url.match(/^\/api\/biz\/v1\/organization\/org-1\/projects\/proj-1\/api_keys(\/copy\/(.+))?$/);
+      if (keysMatch) {
+        if (req.headers.authorization !== 'Bearer mock-biz-token') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ code: 401, msg: 'unauthorized', success: false }));
+        }
+        if (keysMatch[2]) {
+          // copy/{apiKeyId} → secretKey
+          if (decodeURIComponent(keysMatch[2]) !== EXCHANGED_KEY_ID) return json(null);
+          return json({ secretKey: EXCHANGED_SECRET });
+        }
+        if (req.method === 'GET') {
+          // 已存在名为 zcode-api-key 的密钥
+          return json([{ name: 'zcode-api-key', apiKey: EXCHANGED_KEY_ID }]);
+        }
+        // POST 创建
+        return json({ name: 'zcode-api-key', apiKey: EXCHANGED_KEY_ID });
+      }
+
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ code: 404, msg: 'not found', success: false }));
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  return {
+    port,
+    hits,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections?.();
+        server.close(() => resolve());
+      }),
+  };
+}
+
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 
 const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJtb2NrIn0.signature';
@@ -273,12 +358,14 @@ async function main(): Promise<void> {
 
   const upstream = await startMockUpstream();
   const router = await startMockRouter();
+  const zaiApi = await startMockZaiApi();
 
   // ⚠ 必须在 require 插件模块之前设好——settings 在 import 时求值
   process.env.ZCODE_PORT = String(PLUGIN_PORT);
   process.env.ZCODE_BASE_URL = `http://127.0.0.1:${upstream.port}/zcode-messages`;
   process.env.ZAI_FALLBACK_URL = `http://127.0.0.1:${upstream.port}/fallback-messages`;
   process.env.ZCODE_CAPTCHA_CONFIG_URL = `http://127.0.0.1:${upstream.port}/configs`;
+  process.env.ZAI_API_BASE = `http://127.0.0.1:${zaiApi.port}`;
   process.env.ZCODE_SOLVER_PATH = path.join(__dirname, 'mock-solver.cjs');
   process.env.ZCODE_CAPTCHA_RETRIES = '1';
   process.env.ZCODE_CAPTCHA_CACHE_TTL = '60000';
@@ -294,6 +381,8 @@ async function main(): Promise<void> {
   const { createApp } = require('../src/index') as typeof import('../src/index');
   const { PluginClient } = require('../src/pluginClient') as typeof import('../src/pluginClient');
   const { fetchClientConfigs } = require('../src/zcode/configs') as typeof import('../src/zcode/configs');
+  const { resolveCodingPlanApiKey } = require('../src/zcode/exchange') as typeof import('../src/zcode/exchange');
+  const { classifySecret } = require('../src/zcode/auth') as typeof import('../src/zcode/auth');
 
   const app = createApp();
   const server = await new Promise<http.Server>((resolve) => {
@@ -511,6 +600,34 @@ async function main(): Promise<void> {
     check('configs 结果被缓存（不重复请求上游）',
       upstream.configUrls.length === 1, `实际请求 ${upstream.configUrls.length} 次`);
 
+    // ── 10. 兑换链：OAuth access_token → api.z.ai API Key（免验证码路线）──────
+    section('10. 兑换链（绕开无痕验证的官方路线）');
+
+    zaiApi.hits.length = 0;
+    const exchanged = await resolveCodingPlanApiKey('mock-oauth-access-token');
+    check('兑换出 apiKeyId.secretKey 形态的密钥',
+      exchanged.apiKey === `${EXCHANGED_KEY_ID}.${EXCHANGED_SECRET}`, exchanged.apiKey);
+    check('兑换结果被 classifySecret 判为 apiKey（→ 走 api.z.ai 免验证码分支）',
+      classifySecret(exchanged.apiKey) === 'apiKey', classifySecret(exchanged.apiKey));
+    check('命中默认机构/默认项目',
+      exchanged.organizationName === '我的默认机构' && exchanged.projectName === '默认项目',
+      `${exchanged.organizationName} / ${exchanged.projectName}`);
+    check('按官方链路顺序调了 4 个端点',
+      zaiApi.hits[0] === 'POST /api/auth/z/login' &&
+        zaiApi.hits[1] === 'GET /api/biz/customer/getCustomerInfo' &&
+        zaiApi.hits[2].includes('/api_keys') &&
+        zaiApi.hits[3].includes('/copy/'),
+      JSON.stringify(zaiApi.hits));
+
+    // 兑换失败要抛错（login.ts 依赖此行为回退到存 JWT）
+    let threw = false;
+    try {
+      await resolveCodingPlanApiKey('wrong-token');
+    } catch {
+      threw = true;
+    }
+    check('无效 access_token 兑换时抛错（供 login 回退 JWT）', threw);
+
     pluginClient.close();
   } finally {
     await new Promise<void>((resolve) => {
@@ -519,6 +636,7 @@ async function main(): Promise<void> {
     });
     await upstream.close();
     await router.close();
+    await zaiApi.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 

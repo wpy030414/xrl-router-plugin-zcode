@@ -67,6 +67,10 @@ export interface Settings {
   zcodeBaseUrl: string;
   /** 非 JWT 凭证的 Z.AI 回退端点（无需验证码） */
   zaiFallbackUrl: string;
+  /** Z.AI 平台业务根（兑换链 /api/auth/z/login、/api/biz/* 用；免验证码） */
+  zaiApiBase: string;
+  /** ZCode OAuth 根（/oauth/cli/init、/oauth/cli/poll 用） */
+  oauthBase: string;
   /** 额度 / 计费查询基址（capture-key 用） */
   billingBase: string;
   /** 验证码场景配置接口（远端可能不可用，故有内置回退） */
@@ -115,6 +119,8 @@ export const settings: Settings = {
     'https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages',
   ),
   zaiFallbackUrl: env('ZAI_FALLBACK_URL', 'https://api.z.ai/api/anthropic/v1/messages'),
+  zaiApiBase: env('ZAI_API_BASE', 'https://api.z.ai'),
+  oauthBase: env('ZCODE_OAUTH_BASE', 'https://zcode.z.ai/api/v1'),
   billingBase: env('ZCODE_BILLING_BASE', 'https://zcode.z.ai/api/v1/zcode-plan'),
   captchaConfigUrl: env('ZCODE_CAPTCHA_CONFIG_URL', 'https://zcode.z.ai/api/v1/client/configs'),
 
