@@ -201,6 +201,39 @@ API Key 路径不受影响（`api.z.ai` 回退端点不需要验证码）。
 
 可能的出路见 `README.md` 的「已知限制」一节。
 
+### 6.6 【实测·真实 JWT】验证码是 zcode-plan 端点的硬门槛（决定性证据）
+
+上面 F001 还留有「会不会是 jsdom 环境的问题、换个能过风控的环境就行」的侥幸。
+用一个**真实有效的 Coding Plan JWT**（来自 `.env`）直接打上游，彻底排除了这种侥幸：
+
+```
+POST https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages
+  authorization: Bearer <真实 JWT>   model: GLM-5.3   max_tokens: 1
+
+不带验证码头        → HTTP 400 {"code":3007,"msg":"captcha verify failed"}
+带假验证码头        → HTTP 400 {"code":3007,"msg":"captcha verify failed"}
+```
+
+三条铁证：
+
+1. **真实 JWT 能过鉴权**——错误是 `400 captcha verify failed` 而非 `401`，说明凭证本身有效，
+   卡点纯粹在验证码。
+2. **验证码是硬门槛**——不带、带假的，都被 `code:3007` 拒。没有「凭证够硬就免验证码」的后门。
+3. **错误形态是 `400 + code:3007`**（不是先前假设的 `403`）。本插件 `isCaptchaRejection`
+   已覆盖 `400 + captcha 关键词`，会正确识别并映射为 502（见 `module-forward.md`）。
+
+**顺带实测：两条路线的凭证不通用，兑换链只认 OAuth access_token。**
+
+```
+真实 JWT 打 api.z.ai/api/anthropic (x-api-key 或 Bearer)  → 401 token expired or incorrect
+真实 JWT 喂 api.z.ai/api/auth/z/login {token}             → code:500 Z.ai user information is invalid
+```
+
+即：**手里的 JWT 既不能直接打 api.z.ai，也不能喂进兑换链**。兑换链要的是 OAuth 授权返回的
+`zai.access_token`（见第 4.1 节 ready 载荷）。所以路线 A 必须走完整 `pnpm login`（OAuth 授权
+→ 拿 access_token → 兑换），无法用现成的 JWT 走捷径。这也解释了为何第 7 节把
+「路线 A 端到端」列为头号待验证项——它需要一次真实 OAuth 授权才能跑通。
+
 ## 7. 未验证 / 存疑事项
 
 - **【头号】兑换 key 的计费归属未端到端确证**：逆向证明官方把 Coding Plan 的 access_token

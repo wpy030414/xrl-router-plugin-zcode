@@ -159,6 +159,11 @@ async function startMockUpstream(): Promise<MockUpstream> {
       if (scenario === '429') return fail(429, 'rate limit exceeded');
       if (scenario === '401') return fail(401, 'invalid api key');
       if (scenario === 'captcha403') return fail(403, 'captcha verify failed');
+      // 真实上游形态：HTTP 400 + {"code":3007,"msg":"captcha verify failed"}（见 reverse 6.6）
+      if (scenario === 'captcha400') {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ code: 3007, msg: 'captcha verify failed', logid: 'mock' }));
+      }
       if (scenario === 'captcha403once') {
         if (captchaOnceLeft > 0) {
           captchaOnceLeft--;
@@ -547,6 +552,11 @@ async function main(): Promise<void> {
     const captchaAlways = await post({ model: 'GLM-5.2', mock_scenario: 'captcha403' });
     check('验证码持续失效 → 返回 502（而非 403，避免误标红密钥）',
       captchaAlways.status === 502, `实际 ${captchaAlways.status}`);
+
+    // 真实上游形态（reverse 6.6）：HTTP 400 + code:3007 captcha verify failed
+    const captcha400 = await post({ model: 'GLM-5.2', mock_scenario: 'captcha400' });
+    check('真实上游形态 400+code:3007 → 也识别为验证码失效并返回 502',
+      captcha400.status === 502, `实际 ${captcha400.status}`);
 
     upstream.resetCaptchaOnce();
     const captchaOnce = await post({ model: 'GLM-5.2', mock_scenario: 'captcha403once' });
